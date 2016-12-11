@@ -34,9 +34,9 @@ Int16 AIC3204_rset( Uint16 regnum, Uint16 regval )
 #define HWAFFT_IFFT_FLAG 1
 
 extern Uint16 hwafft_br(Int32*, Int32*, Uint16);
-extern Uint16 hwafft_256pts(Int32*,Int32*,Uint16,Uint16);
+extern Uint16 hwafft_512pts(Int32*,Int32*,Uint16,Uint16);
 
-#define N 256
+#define N 512
 
 #pragma DATA_SECTION(samples, ".input"); //DARAM3 block
 Int32 samples[N];
@@ -51,6 +51,33 @@ Int32 scratch[N];
 Int16* result = (Int16*)brev_samples;
 
 int sample = 0;
+
+#define SAMPLE_FREQ_FLOAT 8000.0
+#define DIFF_FREQ (SAMPLE_FREQ_FLOAT/N)
+const Int16 DTMF_freq_index_array[] = {	697.0/DIFF_FREQ + 0.5,
+										770.0/DIFF_FREQ + 0.5,
+										852.0/DIFF_FREQ + 0.5,
+										941.0/DIFF_FREQ + 0.5,
+										1209.0/DIFF_FREQ + 0.5,
+										1336.0/DIFF_FREQ + 0.5,
+										1477.0/DIFF_FREQ + 0.5,
+										1633.0/DIFF_FREQ + 0.5};
+const char DTFM_sign_array[4][4] =	{
+										{'1','2','3','A'},
+										{'4','5','6','B'},
+										{'7','8','9','C'},
+										{'*','0','#','D'}
+									};
+Int16 DTFM_amplitudes[8];
+
+char DTFM_string[] = {"0000000000000000"};
+char* dtfm_p = DTFM_string;
+int dtfm_i = 0;
+
+static inline int s_max(int start_index);
+int DTFM_detection(char *c);
+
+int no_dtfm_flag = 0;
 
 int main(void) {
     Int16 data1, data2;
@@ -82,8 +109,11 @@ int main(void) {
                 samples[sample_index++] = (Int32)data2 << 16;
                 if(sample_index == N)
                 {
+                	while(sample_index != N)
+                		samples[sample_index++] = 0;
+
                 	hwafft_br(samples, brev_samples, N);
-                	Uint16 result_flag = hwafft_256pts(	brev_samples,
+                	Uint16 result_flag = hwafft_512pts(	brev_samples,
                 										scratch,
                 										HWAFFT_FFT_FLAG,
 														HWAFFT_SCALE_ON_FLAG);
@@ -110,6 +140,29 @@ int main(void) {
                 	asm("	NOP");
                 	sqrt_16(result,result,N/2);
                 	sample_index = 0;
+
+                	char c = 0;
+                	if(DTFM_detection(&c) < 0)
+                	{
+                		no_dtfm_flag = 1;
+                	}
+                	else if(no_dtfm_flag == 1)
+                	{
+                		/*if(*dtfm_p == '\0')
+                			dtfm_p = DTFM_string;
+
+                		*(dtfm_p++) = c;*/
+
+                		if(DTFM_string[dtfm_i] == '\0')
+                		    dtfm_i = 0;
+
+                		DTFM_string[dtfm_i++] = c;
+
+                		if(c == '*')
+                			dtfm_i = 0;
+
+                		no_dtfm_flag =  0;
+                	}
                 }
     }
     EZDSP5535_I2S_close();    // Disble I2S
@@ -117,6 +170,47 @@ int main(void) {
     AIC3204_rset( 1,  0x01 );  // Reset codec
 
     return 0;
+}
+
+int DTFM_detection(char *c)
+{
+	int i = 0;
+	for(; i<8; i++)
+	{
+		DTFM_amplitudes[i] = result[DTMF_freq_index_array[i]];
+	}
+	int low_i = 0, hig_i = 4;
+	if((low_i = s_max(low_i)) < 0)
+		return -1;
+	if((hig_i = s_max(hig_i)) < 0)
+		return -1;
+
+	*c = DTFM_sign_array[low_i][hig_i-4];
+	return 0;
+}
+
+static inline int s_max(int start_index)
+{
+	int i = 1, max_i = start_index, max = DTFM_amplitudes[max_i];
+	while(i < start_index + 4) // znajdz najwiekszą wartość
+	{
+		if( DTFM_amplitudes[i] > DTFM_amplitudes[max_i] )
+		{
+			max_i = i;
+			max = DTFM_amplitudes[max_i];
+		}
+		i++;
+	}
+	DTFM_amplitudes[max_i] = 0;
+	i = 0;
+	while(i < start_index + 4) // sprawdz czy tylko jeden ton w low
+	{
+		if( DTFM_amplitudes[i]  >= (max>>4)  ) //czy wiekszy od reszty o 2^5
+			return -1;
+
+		i++;
+	}
+	return max_i;
 }
 
 void AIC3204_config()
@@ -136,12 +230,12 @@ void AIC3204_config()
     AIC3204_rset( 27, 0x0d );  // BCLK and WCLK are set as o/p; AIC3204(Master)
     AIC3204_rset( 28, 0x00 );  // Data ofset = 0
     AIC3204_rset( 4,  0x03 );  // PLL setting: PLLCLK <- MCLK, CODEC_CLKIN <-PLL CLK
-    AIC3204_rset( 6,  0x07 );  // PLL setting: J=7
-    AIC3204_rset( 7,  0x06 );  // PLL setting: HI_BYTE(D=1680)
-    AIC3204_rset( 8,  0x90 );  // PLL setting: LO_BYTE(D=1680)
+    AIC3204_rset( 6,  0x09 );  // PLL setting: J=9
+    AIC3204_rset( 7,  0x15 );  // PLL setting: HI_BYTE(D=5570)
+    AIC3204_rset( 8,  0xC2 );  // PLL setting: LO_BYTE(D=5570)
     AIC3204_rset( 30, 0x88 );  // For 32 bit clocks per frame in Master mode ONLY
                                // BCLK=DAC_CLK/N =(12288000/8) = 1.536MHz = 32*fs
-    AIC3204_rset( 5,  0x91 );  // PLL setting: Power up PLL, P=1 and R=1
+    AIC3204_rset( 5,  0x81 );  // PLL setting: Power up PLL, P=8 and R=1
     EZDSP5535_waitusec(10000); // Wait for PLL to come up
     AIC3204_rset( 13, 0x00 );  // Hi_Byte(DOSR) for DOSR = 128 decimal or 0x0080 DAC oversamppling
     AIC3204_rset( 14, 0x80 );  // Lo_Byte(DOSR) for DOSR = 128 decimal or 0x0080
